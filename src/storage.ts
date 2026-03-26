@@ -68,7 +68,7 @@ export class StorageClient {
   ): Promise<ObjectMeta> {
     const body = typeof content === "string" ? new TextEncoder().encode(content) : content;
     // TODO: call engine gRPC StorageService.Upload via @connectrpc/connect
-    throw new Error(`storage.upload not yet wired to gRPC — bucket=${bucket} key=${key} bytes=${body.byteLength}`);
+    throw new Error(`storage.upload not yet wired to gRPC - bucket=${bucket} key=${key} bytes=${body.byteLength}`);
   }
 
   /**
@@ -76,7 +76,7 @@ export class StorageClient {
    */
   async download(bucket: string, key: string): Promise<DownloadResult> {
     // TODO: call engine gRPC StorageService.Download
-    throw new Error(`storage.download not yet wired to gRPC — bucket=${bucket} key=${key}`);
+    throw new Error(`storage.download not yet wired to gRPC - bucket=${bucket} key=${key}`);
   }
 
   /**
@@ -85,7 +85,7 @@ export class StorageClient {
    */
   async delete(bucket: string, key: string): Promise<boolean> {
     // TODO: call engine gRPC StorageService.Delete
-    throw new Error(`storage.delete not yet wired to gRPC — bucket=${bucket} key=${key}`);
+    throw new Error(`storage.delete not yet wired to gRPC - bucket=${bucket} key=${key}`);
   }
 
   /**
@@ -96,7 +96,7 @@ export class StorageClient {
     options: { prefix?: string; maxResults?: number; pageToken?: string } = {}
   ): Promise<ListResult> {
     // TODO: call engine gRPC StorageService.List
-    throw new Error(`storage.list not yet wired to gRPC — bucket=${bucket}`);
+    throw new Error(`storage.list not yet wired to gRPC - bucket=${bucket}`);
   }
 
   /**
@@ -109,6 +109,6 @@ export class StorageClient {
     expiresInSeconds = 3600
   ): Promise<string> {
     // TODO: call engine gRPC StorageService.Presign
-    throw new Error(`storage.presign not yet wired to gRPC — bucket=${bucket} key=${key} op=${operation} expires=${expiresInSeconds}`);
+    throw new Error(`storage.presign not yet wired to gRPC - bucket=${bucket} key=${key} op=${operation} expires=${expiresInSeconds}`);
   }
 }
