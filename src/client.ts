@@ -2,7 +2,7 @@ import { StorageClient } from "./storage";
 import type { RoutingStrategy } from "./types";
 
 export interface NuclyrConfig {
-  /** Nuclyr API base URL, e.g. "https://app.nuclyr.com" */
+  /** Nuclyr API base URL, e.g. "https://app.nuclyr.cloud" */
   apiUrl: string;
   /** API key issued from the Nuclyr dashboard. */
   apiKey: string;
@@ -18,7 +18,7 @@ export interface NuclyrConfig {
  * import { Nuclyr } from "@nuclyr/sdk";
  *
  * const nuclyr = new Nuclyr({
- *   apiUrl: "https://app.nuclyr.com",
+ *   apiUrl: "https://app.nuclyr.cloud",
  *   apiKey: process.env.NUCLYR_API_KEY!,
  * });
  *
