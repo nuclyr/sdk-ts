@@ -92,8 +92,8 @@ export class StorageClient {
     if (!resp.ok) {
       let message = `Storage API error ${resp.status}`;
       try {
-        const body = await resp.json();
-        if (typeof body?.error === "string") message = body.error;
+        const body = await resp.json() as Record<string, unknown>;
+        if (typeof body?.error === "string") message = body.error as string;
       } catch {}
       throw new Error(message);
     }
