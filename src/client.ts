@@ -1,4 +1,6 @@
 import { StorageClient } from "./storage";
+import { ComputeClient } from "./compute";
+import { QueueClient } from "./queue";
 import type { RoutingStrategy } from "./types";
 
 export interface NuclyrConfig {
@@ -6,7 +8,7 @@ export interface NuclyrConfig {
   apiUrl: string;
   /** API key issued from the Nuclyr dashboard. */
   apiKey: string;
-  /** Default routing strategy applied to all operations unless overridden. */
+  /** Default routing strategy applied to all operations unless overridden per-call. */
   defaultStrategy?: RoutingStrategy;
 }
 
@@ -23,14 +25,18 @@ export interface NuclyrConfig {
  * });
  *
  * await nuclyr.storage.upload("my-bucket", "hello.txt", Buffer.from("hello"));
+ * await nuclyr.compute.run("my-fn", payload);
+ * await nuclyr.queue.publish("orders", Buffer.from(JSON.stringify(order)));
  * ```
  */
 export class Nuclyr {
   readonly storage: StorageClient;
-  private readonly config: NuclyrConfig;
+  readonly compute: ComputeClient;
+  readonly queue: QueueClient;
 
   constructor(config: NuclyrConfig) {
-    this.config = config;
     this.storage = new StorageClient(config);
+    this.compute = new ComputeClient(config);
+    this.queue   = new QueueClient(config);
   }
 }

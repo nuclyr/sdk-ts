@@ -1,5 +1,6 @@
 import type { NuclyrConfig } from "./client";
 import type { RoutingStrategy, DataResidency } from "./types";
+import { NuclyrError } from "./types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ export class StorageClient {
         const body = await resp.json() as Record<string, unknown>;
         if (typeof body?.error === "string") message = body.error as string;
       } catch {}
-      throw new Error(message);
+      throw new NuclyrError(message, String(resp.status));
     }
 
     const text = await resp.text();
