@@ -1,0 +1,15 @@
+version: v2
+managed:
+  enabled: true
+plugins:
+  # Protobuf message types (protobuf-es v2)
+  - remote: buf.build/bufbuild/es
+    out: src/generated
+    opt:
+      - target=ts
+
+  # ConnectRPC service clients (connect-es v2)
+  - remote: buf.build/connectrpc/es
+    out: src/generated
+    opt:
+      - target=ts

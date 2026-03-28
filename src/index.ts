@@ -6,6 +6,7 @@ export type {
   DownloadResult,
   ListResult,
   ObjectMeta,
+  MetadataOptions,
   PresignOperation,
 } from "./storage";
 export type { Provider, RoutingStrategy, DataResidency } from "./types";

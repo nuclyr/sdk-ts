@@ -33,6 +33,11 @@ export interface ListResult {
 
 export type PresignOperation = "get" | "put";
 
+export interface MetadataOptions {
+  accountId?: string;
+  region?: string;
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 function toBase64(data: Uint8Array | Buffer): string {
@@ -83,7 +88,7 @@ export class StorageClient {
     const resp = await fetch(url, {
       ...init,
       headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
+        "X-Api-Key": this.config.apiKey,
         "Content-Type": "application/json",
         ...(init.headers as Record<string, string> | undefined),
       },
@@ -98,7 +103,9 @@ export class StorageClient {
       throw new Error(message);
     }
 
-    return resp.json() as Promise<T>;
+    const text = await resp.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   // ── Public methods ──────────────────────────────────────────────────────────
@@ -236,6 +243,42 @@ export class StorageClient {
         lastModified: new Date(o.last_modified),
       })),
       nextPageToken: res.next_page_token,
+    };
+  }
+
+  /**
+   * Get object metadata without downloading content.
+   */
+  async metadata(
+    bucket: string,
+    key: string,
+    options: MetadataOptions = {}
+  ): Promise<ObjectMeta> {
+    const params: Record<string, string> = { bucket, key };
+    if (options.accountId) params.account_id = options.accountId;
+    if (options.region) params.region = options.region;
+    const qs = new URLSearchParams(params).toString();
+
+    const res = await this.apiFetch<{
+      bucket: string;
+      key: string;
+      size_bytes: number;
+      content_type: string;
+      etag: string;
+      provider: string;
+      region: string;
+      last_modified: string;
+    }>(`/metadata?${qs}`, { method: "GET" });
+
+    return {
+      key: res.key,
+      bucket: res.bucket,
+      size: res.size_bytes,
+      contentType: res.content_type,
+      etag: res.etag,
+      provider: res.provider,
+      region: res.region,
+      lastModified: new Date(res.last_modified),
     };
   }
 
