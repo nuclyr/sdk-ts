@@ -1,6 +1,10 @@
 import type { NuclyrConfig } from "./client";
+import type { Transport } from "@connectrpc/connect";
+import { createClient } from "@connectrpc/connect";
 import { NuclyrError } from "./types";
 import type { RoutingStrategy, DataResidency } from "./types";
+import { QueueService } from "./generated/nuclyr/v1/queue_pb.js";
+import { Provider as GrpcProvider } from "./generated/nuclyr/v1/common_pb.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -28,7 +32,16 @@ export interface SubscribeOptions {
   maxMessages?: number;
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// ── Internal helpers ─────────────────────────────────────────────────────────
+
+function providerName(p: GrpcProvider): string {
+  switch (p) {
+    case GrpcProvider.AWS:   return "aws";
+    case GrpcProvider.GCP:   return "gcp";
+    case GrpcProvider.AZURE: return "azure";
+    default:                 return "unknown";
+  }
+}
 
 function fromBase64(b64: string): Uint8Array {
   if (typeof Buffer !== "undefined") {
@@ -64,9 +77,16 @@ function toBase64(data: Uint8Array | Buffer): string {
  */
 export class QueueClient {
   private readonly config: NuclyrConfig;
+  private readonly transport: Transport | undefined;
 
-  constructor(config: NuclyrConfig) {
-    this.config = config;
+  constructor(config: NuclyrConfig, transport?: Transport) {
+    this.config    = config;
+    this.transport = transport;
+  }
+
+  private grpcClient() {
+    if (!this.transport) throw new Error("transport not configured");
+    return createClient(QueueService, this.transport);
   }
 
   private async apiFetch<T>(path: string, init: RequestInit): Promise<T> {
@@ -115,6 +135,21 @@ export class QueueClient {
     const bytes =
       typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
 
+    if (this.transport) {
+      const resp = await this.grpcClient().publish({
+        topic,
+        payload: bytes as Uint8Array,
+        attributes: options.attributes ?? {},
+        options: {
+          delaySeconds: options.delaySeconds ?? 0,
+        },
+      });
+      return {
+        messageId: resp.messageId,
+        provider: providerName(resp.provider),
+      };
+    }
+
     const res = await this.apiFetch<{
       message_id: string;
       provider: string;
@@ -154,6 +189,26 @@ export class QueueClient {
     options: SubscribeOptions = {}
   ): AsyncGenerator<QueueMessage> {
     const maxMessages = options.maxMessages ?? 10;
+
+    if (this.transport) {
+      const stream = this.grpcClient().subscribe({
+        topic,
+        subscriptionName,
+        maxMessages,
+      });
+      for await (const resp of stream) {
+        const m = resp.message;
+        if (!m) continue;
+        yield {
+          messageId: m.messageId,
+          payload: m.payload,
+          attributes: m.attributes ?? {},
+          publishedAt: m.publishedAt ? new Date(Number(m.publishedAt.seconds) * 1000) : new Date(),
+          deliveryAttempt: m.deliveryAttempt,
+        };
+      }
+      return;
+    }
 
     while (true) {
       const res = await this.apiFetch<{
@@ -195,6 +250,10 @@ export class QueueClient {
    * Acknowledge a message so it won't be redelivered.
    */
   async ack(messageId: string, subscriptionName: string): Promise<boolean> {
+    if (this.transport) {
+      const resp = await this.grpcClient().ack({ messageId, subscriptionName });
+      return resp.acknowledged;
+    }
     const res = await this.apiFetch<{ acknowledged: boolean }>("/ack", {
       method: "POST",
       body: JSON.stringify({

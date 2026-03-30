@@ -1,3 +1,6 @@
+import { createConnectTransport } from "@connectrpc/connect-web";
+import type { Transport } from "@connectrpc/connect";
+
 import { StorageClient } from "./storage";
 import { ComputeClient } from "./compute";
 import { QueueClient } from "./queue";
@@ -8,8 +11,29 @@ export interface NuclyrConfig {
   apiUrl: string;
   /** API key issued from the Nuclyr dashboard. */
   apiKey: string;
+  /**
+   * Optional gRPC-Web base URL for ConnectRPC transport.
+   * When set, the SDK routes calls through gRPC-Web instead of REST.
+   * Typically the same origin as `apiUrl`, e.g. `https://app.nuclyr.cloud`.
+   */
+  grpcUrl?: string;
   /** Default routing strategy applied to all operations unless overridden per-call. */
   defaultStrategy?: RoutingStrategy;
+}
+
+/** @internal – builds shared ConnectRPC transport when grpcUrl is configured. */
+export function buildTransport(config: NuclyrConfig): Transport | undefined {
+  if (!config.grpcUrl) return undefined;
+  return createConnectTransport({
+    baseUrl: config.grpcUrl,
+    // Attach API key as Bearer token on every outgoing gRPC-Web request.
+    interceptors: [
+      (next) => (req) => {
+        req.header.set("authorization", `Bearer ${config.apiKey}`);
+        return next(req);
+      },
+    ],
+  });
 }
 
 /**
@@ -35,8 +59,9 @@ export class Nuclyr {
   readonly queue: QueueClient;
 
   constructor(config: NuclyrConfig) {
-    this.storage = new StorageClient(config);
-    this.compute = new ComputeClient(config);
-    this.queue   = new QueueClient(config);
+    const transport = buildTransport(config);
+    this.storage = new StorageClient(config, transport);
+    this.compute = new ComputeClient(config, transport);
+    this.queue   = new QueueClient(config, transport);
   }
 }

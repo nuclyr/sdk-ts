@@ -1,6 +1,10 @@
 import type { NuclyrConfig } from "./client";
+import type { Transport } from "@connectrpc/connect";
+import { createClient } from "@connectrpc/connect";
 import { NuclyrError } from "./types";
 import type { RoutingStrategy, DataResidency } from "./types";
+import { ComputeService, JobState as GrpcJobState } from "./generated/nuclyr/v1/compute_pb.js";
+import { Provider as GrpcProvider } from "./generated/nuclyr/v1/common_pb.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -95,6 +99,26 @@ function mapState(raw: string): JobState {
   return map[raw] ?? "pending";
 }
 
+function mapJobState(s: GrpcJobState): JobState {
+  switch (s) {
+    case GrpcJobState.PENDING:   return "pending";
+    case GrpcJobState.RUNNING:   return "running";
+    case GrpcJobState.COMPLETED: return "completed";
+    case GrpcJobState.FAILED:    return "failed";
+    case GrpcJobState.CANCELLED: return "cancelled";
+    default:                 return "pending";
+  }
+}
+
+function providerName(p: GrpcProvider): string {
+  switch (p) {
+    case GrpcProvider.AWS:   return "aws";
+    case GrpcProvider.GCP:   return "gcp";
+    case GrpcProvider.AZURE: return "azure";
+    default:             return "unknown";
+  }
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
 /**
@@ -104,9 +128,16 @@ function mapState(raw: string): JobState {
  */
 export class ComputeClient {
   private readonly config: NuclyrConfig;
+  private readonly transport: Transport | undefined;
 
-  constructor(config: NuclyrConfig) {
-    this.config = config;
+  constructor(config: NuclyrConfig, transport?: Transport) {
+    this.config    = config;
+    this.transport = transport;
+  }
+
+  private grpcClient() {
+    if (!this.transport) throw new Error("transport not configured");
+    return createClient(ComputeService, this.transport);
   }
 
   private async apiFetch<T>(path: string, init: RequestInit): Promise<T> {
@@ -154,6 +185,25 @@ export class ComputeClient {
     const bytes =
       typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
 
+    if (this.transport) {
+      const resp = await this.grpcClient().run({
+        functionName,
+        payload: bytes as Uint8Array,
+        options: {
+          memoryMb: options.memoryMb ?? 0,
+          timeoutSeconds: options.timeoutSeconds ?? 0,
+          env: options.env ?? {},
+        },
+      });
+      return {
+        jobId: resp.jobId,
+        result: resp.result,
+        provider: providerName(resp.provider),
+        region: resp.region,
+        durationMs: Number(resp.durationMs),
+      };
+    }
+
     const res = await this.apiFetch<{
       job_id: string;
       result: string;
@@ -184,8 +234,19 @@ export class ComputeClient {
   /**
    * Poll the status of an async job.
    */
-  async getStatus(jobId: string): Promise<JobStatus> {
-    const qs = new URLSearchParams({ job_id: jobId }).toString();
+  async getStatus(jobId: string): Promise<JobStatus> {    if (this.transport) {
+      const resp = await this.grpcClient().getStatus({ jobId });
+      const s = resp.status;
+      return {
+        jobId: s?.jobId ?? jobId,
+        state: mapJobState(s?.state ?? GrpcJobState.UNSPECIFIED),
+        provider: providerName(s?.provider ?? GrpcProvider.UNSPECIFIED),
+        region: s?.region ?? "",
+        startedAt: s?.startedAt   ? new Date(Number(s.startedAt.seconds)   * 1000) : undefined,
+        completedAt: s?.completedAt ? new Date(Number(s.completedAt.seconds) * 1000) : undefined,
+        errorMessage: s?.errorMessage || undefined,
+      };
+    }    const qs = new URLSearchParams({ job_id: jobId }).toString();
     const res = await this.apiFetch<{
       job_id: string;
       state: string;
@@ -212,6 +273,10 @@ export class ComputeClient {
    * @returns true if cancelled, false if already terminal.
    */
   async cancel(jobId: string): Promise<boolean> {
+    if (this.transport) {
+      const resp = await this.grpcClient().cancel({ jobId });
+      return resp.cancelled;
+    }
     const res = await this.apiFetch<{ cancelled: boolean }>("/cancel", {
       method: "POST",
       body: JSON.stringify({ job_id: jobId }),
@@ -223,6 +288,31 @@ export class ComputeClient {
    * List recent jobs with optional filters.
    */
   async listJobs(options: ListJobsOptions = {}): Promise<ListJobsResult> {
+    if (this.transport) {
+      const stateMap: Record<string, GrpcJobState> = {
+        pending: GrpcJobState.PENDING, running: GrpcJobState.RUNNING, completed: GrpcJobState.COMPLETED,
+        failed: GrpcJobState.FAILED,   cancelled: GrpcJobState.CANCELLED,
+      };
+      const resp = await this.grpcClient().listJobs({
+        functionName: options.functionName ?? "",
+        stateFilter: options.stateFilter ? (stateMap[options.stateFilter] ?? GrpcJobState.UNSPECIFIED) : GrpcJobState.UNSPECIFIED,
+        pagination: options.maxResults || options.pageToken
+          ? { pageSize: options.maxResults ?? 0, pageToken: options.pageToken ?? "" }
+          : undefined,
+      });
+      return {
+        jobs: resp.jobs.map((s) => ({
+          jobId: s.jobId,
+          state: mapJobState(s.state),
+          provider: providerName(s.provider),
+          region: s.region,
+          startedAt:   s.startedAt   ? new Date(Number(s.startedAt.seconds)   * 1000) : undefined,
+          completedAt: s.completedAt ? new Date(Number(s.completedAt.seconds) * 1000) : undefined,
+          errorMessage: s.errorMessage || undefined,
+        })),
+        nextPageToken: resp.pagination?.nextPageToken || undefined,
+      };
+    }
     const params: Record<string, string> = {};
     if (options.functionName) params.function_name = options.functionName;
     if (options.stateFilter)  params.state_filter  = options.stateFilter;
@@ -264,6 +354,17 @@ export class ComputeClient {
     jobId: string,
     options: GetLogsOptions = {}
   ): Promise<LogEntry[]> {
+    if (this.transport) {
+      const resp = await this.grpcClient().getLogs({
+        jobId,
+        tailLines: options.tailLines ?? 0,
+      });
+      return resp.entries.map((e) => ({
+        timestamp: e.timestamp ? new Date(Number(e.timestamp.seconds) * 1000) : new Date(),
+        level:     e.level,
+        message:   e.message,
+      }));
+    }
     const params: Record<string, string> = { job_id: jobId };
     if (options.tailLines) params.tail_lines = String(options.tailLines);
     const qs = new URLSearchParams(params).toString();

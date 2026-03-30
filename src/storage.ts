@@ -1,8 +1,12 @@
 import type { NuclyrConfig } from "./client";
+import type { Transport } from "@connectrpc/connect";
+import { createClient } from "@connectrpc/connect";
 import type { RoutingStrategy, DataResidency } from "./types";
 import { NuclyrError } from "./types";
+import { StorageService } from "./generated/nuclyr/v1/storage_pb.js";
+import { Provider } from "./generated/nuclyr/v1/common_pb.js";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+//  Types 
 
 export interface ObjectMeta {
   key: string;
@@ -39,7 +43,7 @@ export interface MetadataOptions {
   region?: string;
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+//  Internal helpers 
 
 function toBase64(data: Uint8Array | Buffer): string {
   if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) {
@@ -64,25 +68,42 @@ function fromBase64(b64: string): Uint8Array {
   return bytes;
 }
 
-// ── Client ────────────────────────────────────────────────────────────────────
+//  Provider enum mapping 
+
+function providerName(p: Provider): string {
+  switch (p) {
+    case Provider.AWS:   return "aws";
+    case Provider.GCP:   return "gcp";
+    case Provider.AZURE: return "azure";
+    default:             return "unknown";
+  }
+}
+
+//  Client 
 
 /**
- * Storage operations: upload, download, delete, list, presign.
+ * Storage operations: upload, download, delete, list, presign, metadata.
  * Routes to the cheapest / lowest-latency / most-compliant provider
  * based on the configured strategy.
  *
- * Calls the Nuclyr API (`/api/storage/*`). The API proxies each request to
- * the engine over internal gRPC. The gRPC-Web endpoint (`/grpc/*`) is
- * available for server-to-server clients using buf-generated stubs.
+ * When `grpcUrl` is set in `NuclyrConfig`, uses ConnectRPC (gRPC-Web) transport.
+ * Otherwise falls back to the REST API (`/api/storage/*`).
  */
 export class StorageClient {
   private readonly config: NuclyrConfig;
+  private readonly transport: Transport | undefined;
 
-  constructor(config: NuclyrConfig) {
-    this.config = config;
+  constructor(config: NuclyrConfig, transport?: Transport) {
+    this.config    = config;
+    this.transport = transport;
   }
 
-  // ── Private fetch helper ────────────────────────────────────────────────────
+  //  Private helpers 
+
+  private grpcClient() {
+    if (!this.transport) throw new Error("transport not configured"); // defensive
+    return createClient(StorageService, this.transport);
+  }
 
   private async apiFetch<T>(path: string, init: RequestInit): Promise<T> {
     const url = `${this.config.apiUrl}/api/storage${path}`;
@@ -109,7 +130,7 @@ export class StorageClient {
     return JSON.parse(text) as T;
   }
 
-  // ── Public methods ──────────────────────────────────────────────────────────
+  //  Public methods 
 
   /**
    * Upload an object to the best available provider.
@@ -131,32 +152,41 @@ export class StorageClient {
     options: UploadOptions = {}
   ): Promise<ObjectMeta> {
     const bytes =
-      typeof content === "string" ? new TextEncoder().encode(content) : content;
+      typeof content === "string" ? new TextEncoder().encode(content) : content as Uint8Array;
+
+    if (this.transport) {
+      const resp = await this.grpcClient().upload({
+        bucket,
+        key,
+        content: bytes,
+        contentType: options.contentType ?? "",
+      });
+      return {
+        key: resp.key,
+        bucket,
+        size: bytes.length,
+        contentType: options.contentType,
+        etag: resp.etag,
+        provider: providerName(resp.provider),
+        region: resp.region,
+      };
+    }
 
     const res = await this.apiFetch<{
-      key: string;
-      etag: string;
-      provider: string;
-      region: string;
+      key: string; etag: string; provider: string; region: string;
     }>("/upload", {
       method: "POST",
       body: JSON.stringify({
-        bucket,
-        key,
-        content: toBase64(bytes as Uint8Array),
+        bucket, key,
+        content: toBase64(bytes),
         content_type: options.contentType,
         strategy: options.strategy,
       }),
     });
-
     return {
-      key: res.key,
-      bucket,
-      size: bytes.length,
-      contentType: options.contentType,
-      etag: res.etag,
-      provider: res.provider,
-      region: res.region,
+      key: res.key, bucket, size: bytes.length,
+      contentType: options.contentType, etag: res.etag,
+      provider: res.provider, region: res.region,
     };
   }
 
@@ -164,42 +194,50 @@ export class StorageClient {
    * Download an object.
    */
   async download(bucket: string, key: string): Promise<DownloadResult> {
+    if (this.transport) {
+      const resp = await this.grpcClient().download({ bucket, key });
+      const meta = resp.metadata;
+      return {
+        data: resp.content,
+        meta: {
+          key: meta?.key ?? key,
+          bucket: meta?.bucket ?? bucket,
+          size: Number(meta?.sizeBytes ?? 0),
+          contentType: resp.contentType || meta?.contentType,
+          etag: meta?.etag,
+          provider: providerName(meta?.provider ?? Provider.UNSPECIFIED),
+          region: meta?.region ?? "",
+        },
+      };
+    }
+
     const qs = new URLSearchParams({ bucket, key }).toString();
     const res = await this.apiFetch<{
-      bucket: string;
-      key: string;
-      content: string;
-      content_type: string;
-      size_bytes: number;
-      etag: string;
-      provider: string;
-      region: string;
+      bucket: string; key: string; content: string; content_type: string;
+      size_bytes: number; etag: string; provider: string; region: string;
     }>(`/download?${qs}`, { method: "GET" });
 
-    const data = fromBase64(res.content);
     return {
-      data,
+      data: fromBase64(res.content),
       meta: {
-        key: res.key,
-        bucket: res.bucket,
-        size: res.size_bytes,
-        contentType: res.content_type,
-        etag: res.etag,
-        provider: res.provider,
-        region: res.region,
+        key: res.key, bucket: res.bucket, size: res.size_bytes,
+        contentType: res.content_type, etag: res.etag,
+        provider: res.provider, region: res.region,
       },
     };
   }
 
   /**
-   * Delete an object.
-   * @returns true if deleted, false if not found.
+   * Delete an object. Returns true if deleted.
    */
   async delete(bucket: string, key: string): Promise<boolean> {
+    if (this.transport) {
+      const resp = await this.grpcClient().delete({ bucket, key });
+      return resp.deleted;
+    }
     const qs = new URLSearchParams({ bucket, key }).toString();
     const res = await this.apiFetch<{ deleted: boolean }>(
-      `/delete?${qs}`,
-      { method: "DELETE" }
+      `/delete?${qs}`, { method: "DELETE" }
     );
     return res.deleted;
   }
@@ -211,36 +249,42 @@ export class StorageClient {
     bucket: string,
     options: { prefix?: string; maxResults?: number; pageToken?: string } = {}
   ): Promise<ListResult> {
+    if (this.transport) {
+      const resp = await this.grpcClient().list({
+        bucket,
+        prefix: options.prefix ?? "",
+        pagination: options.maxResults || options.pageToken
+          ? { pageSize: options.maxResults ?? 0, pageToken: options.pageToken ?? "" }
+          : undefined,
+      });
+      return {
+        objects: resp.objects.map((o) => ({
+          key: o.key, bucket: o.bucket, size: Number(o.sizeBytes),
+          contentType: o.contentType, etag: o.etag,
+          provider: providerName(o.provider), region: o.region,
+        })),
+        nextPageToken: resp.pagination?.nextPageToken || undefined,
+      };
+    }
+
     const qs = new URLSearchParams({
       bucket,
-      ...(options.prefix && { prefix: options.prefix }),
+      ...(options.prefix     && { prefix:      options.prefix }),
       ...(options.maxResults && { max_results: String(options.maxResults) }),
-      ...(options.pageToken && { page_token: options.pageToken }),
+      ...(options.pageToken  && { page_token:  options.pageToken }),
     }).toString();
-
     const res = await this.apiFetch<{
       objects: Array<{
-        bucket: string;
-        key: string;
-        size_bytes: number;
-        content_type: string;
-        etag: string;
-        provider: string;
-        region: string;
-        last_modified: string;
+        bucket: string; key: string; size_bytes: number; content_type: string;
+        etag: string; provider: string; region: string; last_modified: string;
       }>;
       next_page_token?: string;
     }>(`/list?${qs}`, { method: "GET" });
 
     return {
       objects: res.objects.map((o) => ({
-        key: o.key,
-        bucket: o.bucket,
-        size: o.size_bytes,
-        contentType: o.content_type,
-        etag: o.etag,
-        provider: o.provider,
-        region: o.region,
+        key: o.key, bucket: o.bucket, size: o.size_bytes, contentType: o.content_type,
+        etag: o.etag, provider: o.provider, region: o.region,
         lastModified: new Date(o.last_modified),
       })),
       nextPageToken: res.next_page_token,
@@ -255,30 +299,28 @@ export class StorageClient {
     key: string,
     options: MetadataOptions = {}
   ): Promise<ObjectMeta> {
+    if (this.transport) {
+      const resp = await this.grpcClient().getMetadata({ bucket, key });
+      const m = resp.metadata;
+      return {
+        key: m?.key ?? key, bucket: m?.bucket ?? bucket, size: Number(m?.sizeBytes ?? 0),
+        contentType: m?.contentType, etag: m?.etag,
+        provider: providerName(m?.provider ?? Provider.UNSPECIFIED), region: m?.region ?? "",
+      };
+    }
+
     const params: Record<string, string> = { bucket, key };
     if (options.accountId) params.account_id = options.accountId;
-    if (options.region) params.region = options.region;
+    if (options.region)    params.region      = options.region;
     const qs = new URLSearchParams(params).toString();
-
     const res = await this.apiFetch<{
-      bucket: string;
-      key: string;
-      size_bytes: number;
-      content_type: string;
-      etag: string;
-      provider: string;
-      region: string;
-      last_modified: string;
+      bucket: string; key: string; size_bytes: number; content_type: string;
+      etag: string; provider: string; region: string; last_modified: string;
     }>(`/metadata?${qs}`, { method: "GET" });
 
     return {
-      key: res.key,
-      bucket: res.bucket,
-      size: res.size_bytes,
-      contentType: res.content_type,
-      etag: res.etag,
-      provider: res.provider,
-      region: res.region,
+      key: res.key, bucket: res.bucket, size: res.size_bytes, contentType: res.content_type,
+      etag: res.etag, provider: res.provider, region: res.region,
       lastModified: new Date(res.last_modified),
     };
   }
@@ -292,16 +334,19 @@ export class StorageClient {
     operation: PresignOperation,
     expiresInSeconds = 3600
   ): Promise<string> {
-    const qs = new URLSearchParams({
-      bucket,
-      key,
-      operation,
-      expires_in_seconds: String(expiresInSeconds),
-    }).toString();
+    if (this.transport) {
+      const op = operation === "get" ? 1 : 2; // PresignOperation enum
+      const resp = await this.grpcClient().presign({
+        bucket, key, operation: op, expiresInSeconds,
+      });
+      return resp.url;
+    }
 
+    const qs = new URLSearchParams({
+      bucket, key, operation, expires_in_seconds: String(expiresInSeconds),
+    }).toString();
     const res = await this.apiFetch<{ url: string; expires_at: string }>(
-      `/presign?${qs}`,
-      { method: "GET" }
+      `/presign?${qs}`, { method: "GET" }
     );
     return res.url;
   }
